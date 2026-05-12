@@ -1,0 +1,13 @@
+{
+  "mcpServers": {
+    "agentic-qa": {
+      "type": "stdio",
+      "command": "C:\\Python313\\python.exe",
+      "args": [
+        "-m",
+        "src.server"
+      ],
+      "env": {}
+    }
+  }
+}
