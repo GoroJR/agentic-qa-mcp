@@ -1,13 +1,16 @@
 """
 Jira REST API client for the Agentic QA MCP server.
 
-Exposes three helpers used by the MCP tools:
-- fetch_ticket(key)        : GET issue, flatten ADF to plain text
-- attach_file(key, path)   : POST a file attachment to a ticket
-- add_comment(key, text)   : POST a plain-text comment to a ticket
+v3: adds create_issue() so the server can spawn tickets from transcripts.
 
-Auth uses Atlassian Cloud's Basic Auth scheme: email + API token.
-Reads ATLASSIAN_* values from environment (loaded from .env by server.py).
+Exposes:
+- fetch_ticket(key)               : GET issue, flatten ADF to plain text
+- attach_file(key, path)          : POST a file attachment
+- add_comment(key, text)          : POST a plain-text comment
+- create_issue(...)               : POST a new ticket with description + labels
+
+Auth: Atlassian Cloud Basic Auth (email + API token).
+Reads ATLASSIAN_* env vars (loaded from .env by server.py).
 """
 
 import os
@@ -16,18 +19,15 @@ import httpx
 
 
 def _base_url() -> str:
-    """Build the Jira API base URL from the ATLASSIAN_SITE env var."""
     site = os.environ.get("ATLASSIAN_SITE", "").strip()
     if not site:
         raise RuntimeError("ATLASSIAN_SITE is not set in environment.")
-    # Allow either "rooy15.atlassian.net" or full URL
     if not site.startswith("http"):
         site = f"https://{site}"
     return f"{site}/rest/api/3"
 
 
 def _auth() -> tuple[str, str]:
-    """Read email + token from environment for Basic Auth."""
     email = os.environ.get("ATLASSIAN_EMAIL", "").strip()
     token = os.environ.get("ATLASSIAN_API_TOKEN", "").strip()
     if not email or not token:
@@ -36,54 +36,109 @@ def _auth() -> tuple[str, str]:
 
 
 def _flatten_adf(node: dict) -> str:
-    """
-    Atlassian Document Format (ADF) is a nested JSON tree.
-    Walk it recursively and collect plain text, preserving line breaks
-    for paragraphs, lists, and headings.
-    """
+    """Walk an Atlassian Document Format tree and emit plain text."""
     if not isinstance(node, dict):
         return ""
 
     node_type = node.get("type", "")
-    text_parts = []
-
-    # Leaf: actual text node
     if node_type == "text":
         return node.get("text", "")
-
-    # Hard break inside a paragraph
     if node_type == "hardBreak":
         return "\n"
 
-    # Recurse into children
-    children = node.get("content", [])
-    for child in children:
+    text_parts = []
+    for child in node.get("content", []):
         text_parts.append(_flatten_adf(child))
-
     inner = "".join(text_parts)
 
-    # Block-level types get newlines around them
-    block_types = {"paragraph", "heading", "listItem", "bulletList", "orderedList"}
-    if node_type in block_types:
-        # Bullet/numbered items get a leading "- " for readability
-        if node_type == "listItem":
-            return f"- {inner}\n"
+    if node_type == "listItem":
+        return f"- {inner}\n"
+    if node_type in ("paragraph", "heading", "bulletList", "orderedList"):
         return f"{inner}\n"
 
     return inner
 
 
+def _text_to_adf(text: str) -> dict:
+    """
+    Convert plain text into a minimal ADF document.
+
+    Splits on blank lines into paragraphs; lines starting with "- " inside
+    a paragraph block are converted into a bullet list. Keeps the result
+    visually similar to what a human would type.
+    """
+    blocks = []
+    current_paragraph_lines: list[str] = []
+    current_bullets: list[str] = []
+
+    def flush_paragraph():
+        nonlocal current_paragraph_lines
+        if current_paragraph_lines:
+            joined = "\n".join(current_paragraph_lines).strip()
+            if joined:
+                # Embed hardBreaks for in-paragraph newlines
+                content = []
+                first = True
+                for line in joined.split("\n"):
+                    if not first:
+                        content.append({"type": "hardBreak"})
+                    content.append({"type": "text", "text": line})
+                    first = False
+                blocks.append({"type": "paragraph", "content": content})
+            current_paragraph_lines = []
+
+    def flush_bullets():
+        nonlocal current_bullets
+        if current_bullets:
+            blocks.append({
+                "type": "bulletList",
+                "content": [
+                    {
+                        "type": "listItem",
+                        "content": [{
+                            "type": "paragraph",
+                            "content": [{"type": "text", "text": b}],
+                        }],
+                    }
+                    for b in current_bullets
+                ],
+            })
+            current_bullets = []
+
+    for raw_line in text.split("\n"):
+        line = raw_line.rstrip()
+        stripped = line.lstrip()
+
+        if not stripped:
+            # Blank line: end current block
+            flush_paragraph()
+            flush_bullets()
+            continue
+
+        if stripped.startswith("- "):
+            # Bullet item: end paragraph if needed
+            flush_paragraph()
+            current_bullets.append(stripped[2:])
+        else:
+            # Regular text: end bullets if needed
+            flush_bullets()
+            current_paragraph_lines.append(line)
+
+    flush_paragraph()
+    flush_bullets()
+
+    if not blocks:
+        blocks = [{"type": "paragraph", "content": [{"type": "text", "text": text or ""}]}]
+
+    return {
+        "type": "doc",
+        "version": 1,
+        "content": blocks,
+    }
+
+
 def fetch_ticket(key: str) -> dict:
-    """
-    Fetch a single Jira issue and return a flat dict:
-      {
-        "key": "KAN-6",
-        "summary": "...",
-        "description": "...full flattened text...",
-        "status": "Por hacer",
-        "url": "https://rooy15.atlassian.net/browse/KAN-6"
-      }
-    """
+    """Fetch a Jira issue and return a flat dict."""
     url = f"{_base_url()}/issue/{key}"
     headers = {"Accept": "application/json"}
 
@@ -94,11 +149,8 @@ def fetch_ticket(key: str) -> dict:
 
     fields = data.get("fields", {})
 
-    description_node = fields.get("description") or {}
-    description_text = _flatten_adf(description_node).strip()
-
-    status_obj = fields.get("status") or {}
-    status_name = status_obj.get("name", "Unknown")
+    description_text = _flatten_adf(fields.get("description") or {}).strip()
+    status_name = (fields.get("status") or {}).get("name", "Unknown")
 
     site = os.environ.get("ATLASSIAN_SITE", "").replace("https://", "").strip()
     browse_url = f"https://{site}/browse/{key}"
@@ -113,56 +165,28 @@ def fetch_ticket(key: str) -> dict:
 
 
 def add_comment(key: str, text: str) -> dict:
-    """
-    POST a plain-text comment to a Jira issue.
-    Returns {comment_id, created}.
-    """
+    """POST a plain-text comment to a Jira issue (wrapped in minimal ADF)."""
     url = f"{_base_url()}/issue/{key}/comment"
     headers = {"Accept": "application/json", "Content-Type": "application/json"}
-
-    # Jira v3 requires ADF for comment bodies. Wrap text in a minimal ADF doc.
-    payload = {
-        "body": {
-            "type": "doc",
-            "version": 1,
-            "content": [
-                {
-                    "type": "paragraph",
-                    "content": [{"type": "text", "text": text}],
-                }
-            ],
-        }
-    }
+    payload = {"body": _text_to_adf(text)}
 
     with httpx.Client(timeout=30.0) as client:
         resp = client.post(url, auth=_auth(), headers=headers, json=payload)
         resp.raise_for_status()
         data = resp.json()
 
-    return {
-        "comment_id": data.get("id"),
-        "created": data.get("created"),
-    }
+    return {"comment_id": data.get("id"), "created": data.get("created")}
 
 
 def attach_file(key: str, file_path: str) -> dict:
-    """
-    Upload a file as an attachment on a Jira issue.
-    Returns {attachment_id, filename, size}.
-
-    Note: Jira requires the special X-Atlassian-Token: no-check header
-    for file uploads, and the multipart field name MUST be 'file'.
-    """
+    """Upload a file as an attachment on a Jira issue."""
     if not os.path.exists(file_path):
         raise FileNotFoundError(f"Attachment file not found: {file_path}")
 
     url = f"{_base_url()}/issue/{key}/attachments"
-    headers = {
-        "Accept": "application/json",
-        "X-Atlassian-Token": "no-check",
-    }
-
+    headers = {"Accept": "application/json", "X-Atlassian-Token": "no-check"}
     filename = os.path.basename(file_path)
+
     with open(file_path, "rb") as f:
         files = {"file": (filename, f, "application/octet-stream")}
         with httpx.Client(timeout=60.0) as client:
@@ -170,7 +194,6 @@ def attach_file(key: str, file_path: str) -> dict:
             resp.raise_for_status()
             data = resp.json()
 
-    # API returns a list of attachment objects (you can upload multiple at once)
     if isinstance(data, list) and data:
         a = data[0]
         return {
@@ -178,11 +201,73 @@ def attach_file(key: str, file_path: str) -> dict:
             "filename": a.get("filename"),
             "size": a.get("size"),
         }
-
     return {"attachment_id": None, "filename": filename, "size": None}
 
 
-# Smoke test: run `python -m src.jira_client KAN-6` from project root
+def create_issue(
+    project_key: str,
+    summary: str,
+    description_text: str,
+    issue_type_name: str = "Tarea",
+    labels: list[str] | None = None,
+) -> dict:
+    """
+    Create a new Jira issue.
+
+    Args:
+        project_key: e.g. "KAN"
+        summary: Ticket title.
+        description_text: Plain-text body, will be converted to ADF.
+        issue_type_name: Name of the issue type to use. Defaults to "Tarea"
+                         (the Spanish "Task" type, which is what the KAN project has).
+                         To use other types, pass their localized name as it appears
+                         in the project (e.g. "Historia", "Error", "Epic").
+        labels: Optional list of label strings. No spaces in labels (Jira rule).
+                Used to encode metadata like "type:story", "type:bug".
+
+    Returns:
+        {"key": "KAN-7", "id": "10025", "url": "https://...browse/KAN-7"}
+    """
+    url = f"{_base_url()}/issue"
+    headers = {"Accept": "application/json", "Content-Type": "application/json"}
+
+    # Sanitize labels: Jira labels cannot contain spaces
+    safe_labels = []
+    for lbl in (labels or []):
+        if lbl:
+            safe_labels.append(lbl.replace(" ", "_"))
+
+    fields: dict = {
+        "project": {"key": project_key},
+        "summary": summary[:250],  # Jira limit
+        "issuetype": {"name": issue_type_name},
+        "description": _text_to_adf(description_text),
+    }
+    if safe_labels:
+        fields["labels"] = safe_labels
+
+    payload = {"fields": fields}
+
+    with httpx.Client(timeout=30.0) as client:
+        resp = client.post(url, auth=_auth(), headers=headers, json=payload)
+        # Surface Jira's error body if something went wrong
+        if resp.status_code >= 400:
+            raise RuntimeError(
+                f"Jira create_issue failed ({resp.status_code}): {resp.text}"
+            )
+        data = resp.json()
+
+    site = os.environ.get("ATLASSIAN_SITE", "").replace("https://", "").strip()
+    browse_url = f"https://{site}/browse/{data.get('key')}"
+
+    return {
+        "key": data.get("key"),
+        "id": data.get("id"),
+        "url": browse_url,
+    }
+
+
+# Smoke test: python -m src.jira_client KAN-6
 if __name__ == "__main__":
     from dotenv import load_dotenv
     load_dotenv()

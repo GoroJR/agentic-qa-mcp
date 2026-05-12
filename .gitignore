@@ -28,3 +28,8 @@ output/
 .atlassian/
 # Claude Code per-project metadata
 .claude/
+
+# Scratch JSON dumps from smoke testing
+extraction*.json
+jira_fields.json
+kan_project.json

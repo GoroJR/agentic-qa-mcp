@@ -1,0 +1,32 @@
+Refinement call - Tuesday standup
+Attendees: Maria (PM), Tom (Tech lead), Sara (Designer), Erick (QA)
+
+Maria: OK next item is the saved searches feature for hotel search. Users keep asking for it.
+Tom: So basically when someone searches for hotels, they can save that search to their account?
+Maria: Yeah. So they can come back later and re-run it without typing everything.
+Sara: What about saving the filters too? Like dates, price range, amenities?
+Maria: Yes, all of it. The whole search criteria.
+Tom: How many saved searches can a user have?
+Maria: Hmm. Let's say 10 for now. We can revisit.
+Sara: Should it be 10 per account or 10 per session?
+Maria: Per account. They persist.
+Tom: Do we want to show them on the dashboard or in a separate "Saved" section?
+Maria: Separate section. Under the user menu. Like "My Saved Searches".
+Sara: I'll mock that up.
+Tom: What happens if the user tries to save an 11th search?
+Maria: They get a message asking them to delete one first.
+Sara: We need to think about what shows in the saved item - just the query string or also a preview?
+Maria: Let's just show the query summary for now. Like "Madrid, Aug 1-5, 2 adults, $100-200".
+Tom: Should the saved searches sync across devices?
+Maria: Yes, they're tied to the account.
+Tom: Do they expire?
+Maria: ...good question. Let's say no expiry for now but if check-in date is in the past, we mark it as stale.
+Erick: For testing, do these need to support empty searches? Like saving a search with no filters?
+Maria: No, must have at least a destination.
+Tom: One more - if the user is anonymous, can they save?
+Maria: No, requires login.
+Maria: OK that's the story. Tom can you scope it?
+Tom: Yeah I'd say M, maybe L if we need to handle the cross-device sync properly.
+Maria: Let's say M for now.
+
+(End of transcript)
