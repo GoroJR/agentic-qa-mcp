@@ -159,7 +159,7 @@ agentic-qa-mcp/
 ## Why this matters
 
 Test case design is the highest-leverage task in QA — and one of the most automatable with LLMs when done right. This project demonstrates a working agentic workflow that integrates a real ticket system, a real test design framework, and a real delivery format — not a toy demo. It's the working prototype of the AI Acceptance Criteria + Test Case Generation pilot I am proposing for enterprise QA delivery.
-
+> ⚠️ Built on personal time, with personal accounts, and with synthetic hotel-domain acceptance criteria. Any enterprise use should go through proper security review and client approval.
 ---
 
 ## Author
